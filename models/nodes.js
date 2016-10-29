@@ -1,26 +1,16 @@
 var async = require('async');
-var squel = require('squel');
 
 var db = require('../db.js');
+var b = require('./basic.js');
+var squel = b.squel;
 
 var table = 'mind';
 var nodeListColumns = ['id', 'name', 'subtitle', 'father', 'sort', 'type', 'importance', 'open', 
-  'created_by', 'created_at', 'updated_at'];
+  'created_by', 'created_at', 'updated_at', 'link_to'];
 var nodeDetailColumns = nodeListColumns.concat(['content']);
-var updateColumns = ['name', 'subtitle', 'content', 'importance', 'open'];
+var updateColumns = ['name', 'subtitle', 'content', 'importance', 'open', 'link_to'];
 
-squel.registerValueHandler(Date, function(date) {
-  return date.getFullYear() + '-' + (date.getMonth() + 1) + '-' + date.getDate() + ' ' + 
-    date.getHours() + ':' + date.getMinutes() + ':' + date.getSeconds();
-});
 
-squel.registerValueHandler('boolean', function(bool) {
-  return bool ? 1 : 0;
-});
-
-function isNumeric(n) {
-  return !isNaN(parseFloat(n)) && isFinite(n);
-}
 
 // public:
 
@@ -32,12 +22,15 @@ function isNumeric(n) {
  * @param {string} node.type the type of the node
  */
 exports.addNode = function(node, done) {
+  b.debug('modules.nodes', '[addNode](', node, ')');
+
   var date = new Date();
   var userId = 'admin'; // TODO
 
   // do query
   async.auto({
     getSisterSort: function(done) {
+      b.debug('modules.nodes', 'get sister sort');
       var query = squel.select().from(table)
         .field('sort')
         .where('father = ?', parseInt(node.father))
@@ -45,34 +38,44 @@ exports.addNode = function(node, done) {
         .limit(1);
 
       query = query.toParam();
+      b.debug('modules.nodes', query);
   
       // do query
       db.get().query(query.text, query.values, function(err, result) {
         if (err) return done(err);
         var sort = result.length === 0 ? 0 : result[0].sort;
+        b.debug('modules.nodes', 'result');
+        b.debug('modules.nodes', sort);
         done(null, sort);
       });
     },
     addNode: ['getSisterSort', function(results, done) {  // insert
+      b.debug('modules.nodes', 'add node');
       var query = squel.insert().into(table)
         .set('name', 'new node')
         .set('father', parseInt(node.father))
         .set('type', node.type)
+        .set('open', true)
         .set('sort', parseInt(results.getSisterSort) + 1)
         .set('created_by', userId)
         .set('created_at', date)
         .set('updated_at', date);
 
       query = query.toParam();
+      b.debug('modules.nodes', query);
   
       // do query
       db.get().query(query.text, query.values, function(err, result) {
-        if (err) return done(err);
+        if (err) done(err);
+        b.debug('modules.nodes', 'result');
+        b.debug('modules.nodes', result);
         done(null, result.insertId);
       });
     }]
   }, function(err, results) {
-    if (err) return done(err);
+    if (err) done(err);
+    b.debug('modules.nodes', 'results');
+    b.debug('modules.nodes', results);
     done(null, results.addNode);
   });
 };
@@ -88,11 +91,11 @@ exports.addNode = function(node, done) {
 exports.updateNode = function(node, done) {
   var query = squel.update().table(table);
   console.log(node);
-  node.open = node.open === 'true' ? true : false;
+  node.open = node.open === 'false' ? false : true;
   for (var key in node) {
     if (updateColumns.indexOf(key) >= 0) {
       var value = node[key];
-      value = isNumeric(value) ? parseFloat(value) : value;
+      value = b.isNumeric(value) ? parseFloat(value) : value;
       query = query.set(key, value);
     }
   }
@@ -178,6 +181,19 @@ exports.moveNode = function(id, fatherId, sisterId, done) {
 
 // R:
 
+function getNodeInListQuery(id) {
+  var query = squel.select().from(table, 'm')
+    .where('id = ?', parseInt(id));
+  for (var index in nodeListColumns) {
+    query = query.field(nodeListColumns[index]);
+  }
+  query = query.field(
+    squel.select().field('COUNT(id) >= 1').from(table, 'c').where('c.father = m.id'), 'isParent'
+  );
+  query = query.field("NULLIF(content, '') IS NULL AS content_is_null");
+  return query;
+}
+
 /**
  * Get all descendant nodes of a node (with certain id) until open = false or to the end
  * @param {number} id the id of the father node
@@ -185,56 +201,87 @@ exports.moveNode = function(id, fatherId, sisterId, done) {
 exports.getDescendantNodesById = function(fatherId, done) {
   fatherId = fatherId ? fatherId : 1;
 
-  var queryCurrentNode = squel.select().from(table)
-    .where('id = ?', parseInt(fatherId));
-  var queryChildNodes = squel.select().from(table)
-    .where('father = ?', parseInt(fatherId))
-    .order('sort', true);
-  for (var index in nodeListColumns) {
-    queryCurrentNode = queryCurrentNode.field(nodeListColumns[index]).field("NULLIF(content, '') IS NULL AS content_is_null");
-    queryChildNodes = queryChildNodes.field(nodeListColumns[index]).field("NULLIF(content, '') IS NULL AS content_is_null");
-  }
-
-  queryCurrentNode = queryCurrentNode.toParam();
-  queryChildNodes = queryChildNodes.toParam();
-
+  var query = getNodeInListQuery(fatherId);
+  query = query.toParam();
 
   // query current node which id = fatherId
-  db.get().query(queryCurrentNode.text, queryCurrentNode.values, function(err, fatherRows) {
+  db.get().query(query.text, query.values, function(err, rows) {
     if (err) return done(err);
 
-    // requery if it is a link
-    if (fatherRows[0].type == 'link') {
-      async.auto({
-        link: function(done) {
-          queryLinkNode(fatherRows[0], done);
-        }
-      }, function(err, results) {
-        if (err) return done(err);
-        fatherRows[0] = results.link;
-      });
-    }
-
-    // query child nodes of the current node
-    db.get().query(queryChildNodes.text, queryChildNodes.values, function(err, rows) {
-      if (err) return done(err);
-      // get child nodes of each child node by uding getChildNodes function
-      async.forEach(rows, getChildNodes, function(err, results) {
-        if (err) return done(err);
-        fatherRows[0].children = rows;
-        done(null, fatherRows);
-      });
+    async.auto({
+      children: function(done) {
+        getChildren(rows[0], done, true);
+      }
+    }, function(err, results) {
+      done(null, rows);
     });
   });
 };
 
-exports.getNodeDetail = function(id, done) {
-  var query = squel.select().from(table)
-    .where('id = ?', parseInt(id));
+function getChildren(node, done, force) {
+  async.auto({
+    link: function(done) {
+      if (node.type === 'link') {
+        var query = getNodeInListQuery(parseInt(node.link_to));
+        query = query.toParam();
+        
+        db.get().query(query.text, query.values, function(err, rows) {
+          if (err) return done(err);
+          var target = rows[0];
+          node.link_to = target.id;
+          node.name = target.name;
+          node.subtitle = target.subtitle;
+          done();
+        });
+      } else {
+        done();
+      }
+    },
+    children: ['link', function(retuslts, done) {
+      if (node.open || force) {
+        var query = squel.select().from(table, 'm')
+          .where('father = ?', node.type === 'link' ? node.link_to : node.id)
+          .order('sort', true);
+        for (var index in nodeListColumns) {
+          query = query.field(nodeListColumns[index]);
+        }
+        query = query.field(
+          squel.select().field('COUNT(id) >= 1').from(table, 'c').where('c.father = m.id'), 'isParent'
+        );
+        query = query.field("NULLIF(content, '') IS NULL AS content_is_null");
+
+        query = query.toParam();
+        db.get().query(query.text, query.values, function(err, children) {
+          if (err) return done(err);
+          node.children = children;
+
+          async.eachOf(children, function(child, key, done) {
+            getChildren(child, done);
+          }, function(err) {
+            if (err) return done(err);
+            done();
+          });
+        });
+      } else {
+        done();
+      }
+    }]
+  }, function(err, results) {
+    if (err) return done(err);
+    done();
+  });
+}
+
+function getNodeDetailQuery(id) {
+  var query = getNodeInListQuery(id);
   for (var index in nodeDetailColumns) {
     query = query.field(nodeDetailColumns[index]);
   }
+  return query;
+}
 
+exports.getNodeDetail = function(id, done) {
+  var query = getNodeDetailQuery(id);
   query = query.toParam();
 
   // do query
@@ -245,7 +292,20 @@ exports.getNodeDetail = function(id, done) {
     async.parallel({
       node: function(done) {
         if (node.type === 'link') {
-          queryLinkNode(node, done);
+          var query = getNodeDetailQuery(node.link_to);
+          query = query.toParam();
+
+          // do query
+          db.get().query(query.text, query.values, function(err, target) {
+            if (err) return done(err);
+            target = target[0];
+            node.content = target.node;
+            node.name = target.name;
+            node.subtitle = target.subtitle;
+            node.content = target.content;
+
+            done(null, node);
+          });
         } else {
           done(null, node);
         }
@@ -309,89 +369,3 @@ exports.removeNode = function(id, done) {
   });
   
 };
-
-// private:
-
-/**
- * Query link node again to get all the information
- */
-function queryLinkNode(node, done) {
-  var query = squel.select().from(table, 'l')
-    .field('l.id').field('ori.id AS link_to')
-    .field('ori.name').field('ori.subtitle')
-    .field('l.father').field('l.sort').field('l.open')
-    .field('ori.created_by').field('ori.created_at').field('ori.updated_at')
-    .field('l.created_by AS linked_by').field('l.type').field('ori.importance')
-    .where('l.id = ?', parseInt(node.id))
-    .right_join(table, 'ori', 'ori.id = l.name');
-
-  query = query.toParam();
-  
-  db.get().query(query.text, query.values, function(err, rows) {
-    if (err) return done(err);
-    done(null, rows[0]);
-  });
-}
-
-/**
- * Get all child nodes of a father node
- * @param {Object} node the father node
- */
-function getChildNodes(node, done) {
-  
-  // async.auto({
-  //   link: function(done) {
-  //     if (node.type === 'link') {
-  //       queryLinkNode(node, done);
-  //     } else {
-  //       done(null, node);
-  //     }
-  //   },
-  //   children: ['link', function(results, done) {
-  //     var node = results.link;
-      if (node.open) {
-        var queryChildNodes = squel.select().from(table)
-          .where('father = ?', parseInt(node.type === 'link' ? node.name : node.id))
-          .order('sort', true);
-        for (var index in nodeListColumns) {
-          queryChildNodes = queryChildNodes.field(nodeListColumns[index]);
-        }
-
-        queryChildNodes = queryChildNodes.toParam();
-
-        // do query
-        db.get().query(queryChildNodes.text, queryChildNodes.values, function(err, rows) {
-          if (err) return done(err);
-          if (rows.length === 0) {
-            done();
-          } else {
-            node.children = rows;
-            async.forEach(node.children, getChildNodes, function(err, results) {
-              if (err) return done(err);
-              done();
-            });
-          }
-        });
-      } else {
-        var queryCountChildNodes = squel.select().from(table)
-          .field('COUNT(*)')
-          .where('father = ?', parseInt(node.type === 'link' ? node.name : node.id));
-
-        queryCountChildNodes = queryCountChildNodes.toParam();
-
-        db.get().query(queryCountChildNodes.text, queryCountChildNodes.values, function(err, rows) {
-          if (err) return done(err);
-          if (rows[0].count !== 0) {
-            node.isParent = true;
-          } else {
-            node.isParent = false;
-          }
-          done();
-        });
-      }
-  //   }]
-  // }, function(err, results) {
-  //   if (err) return done(err);
-  //   done();
-  // });
-}

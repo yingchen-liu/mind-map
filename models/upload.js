@@ -1,20 +1,12 @@
 var async = require('async');
-var squel = require('squel');
 
 var db = require('../db.js');
+var basic = require('./basic.js');
+var squel = basic.squel;
 
 var table = 'upload';
 var columns = ['id', 'node', 'name', 'description', 'uploaded_at', 'uploaded_by', 'type'];
 var updateColumns = ['name', 'description'];
-
-squel.registerValueHandler(Date, function(date) {
-  return date.getFullYear() + '-' + (date.getMonth() + 1) + '-' + date.getDate() + ' ' + 
-    date.getHours() + ':' + date.getMinutes() + ':' + date.getSeconds();
-});
-
-function isNumeric(n) {
-  return !isNaN(parseFloat(n)) && isFinite(n);
-}
 
 // public:
 

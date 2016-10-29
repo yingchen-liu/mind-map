@@ -19,5 +19,9 @@
     "mysql": "^2.11.1",
     "serve-favicon": "~2.3.0",
     "squel": "^5.3.3"
+  },
+  "devDependencies": {
+    "colors": "^1.1.2",
+    "debug": "^2.2.0"
   }
 }
